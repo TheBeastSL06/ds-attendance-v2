@@ -251,7 +251,7 @@
    Paste your Apps Script Web App URL below.
    Leave empty ('') to use localStorage only.
    ════════════════════════════════════════════ */
-var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzVjZDXEermg_EUK2BjdN87Rnp62_OzWhJ9lbkGln8iEftr_DcWKge8TOOC8Cjn8wck/exec';   /* <-- PASTE YOUR WEB APP URL HERE */
+var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwwSu2Adoq1YftBy0QJImnZ16-6zy4_oNlqK29qHBAf5lFJet84D-HIjksb83ODNWK8iw/exec';   /* <-- PASTE YOUR WEB APP URL HERE */
 
 /* ════════════════════════════════════════════
    CURRENT USER  (loaded before anything else)
@@ -817,6 +817,158 @@ function updateLvRptYear(v)       { lvRptYear=v; render(); }
 function updateLeaveYear(v)       { leaveYear=v; render(); }
 
 /* ════════════════════════════════════════════
+   TODAY'S QUICK ENTRY
+   Stores a partial record {date, dutyOn, dayType}
+   until Duty Off is recorded, then saves fully.
+   ════════════════════════════════════════════ */
+var todayEntry = load('ot_today', null); /* { date, dutyOn, dayType } */
+
+function nowTimeStr() {
+  var n = new Date();
+  return String(n.getHours()).padStart(2,'0') + ':' + String(n.getMinutes()).padStart(2,'0');
+}
+
+function showToast(msg) {
+  var t = document.getElementById('toast-msg');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast-msg';
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);' +
+      'background:var(--text);color:var(--surface);padding:10px 22px;border-radius:24px;' +
+      'font-size:13px;font-weight:500;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);' +
+      'transition:opacity .3s;white-space:nowrap';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._hide);
+  t._hide = setTimeout(function(){ t.style.opacity='0'; }, 2800);
+}
+
+function quickRecordDutyOn() {
+  var t = nowTimeStr();
+  todayEntry = { date: todayStr(), dutyOn: t, dayType: 'working' };
+  try { localStorage.setItem(userKey('ot_today'), JSON.stringify(todayEntry)); } catch(e) {}
+  showToast('🕐 Duty On recorded: ' + t);
+  render();
+}
+
+function quickRecordDutyOff() {
+  if (!todayEntry) return;
+  var t = nowTimeStr();
+  if (timeToMins(t) <= timeToMins(todayEntry.dutyOn)) {
+    alert('Duty Off time (' + t + ') must be after Duty On (' + todayEntry.dutyOn + ').'); return;
+  }
+  /* Build and save the full record */
+  var ym = todayEntry.date.slice(0,7);
+  var sc = countShortLeavesInMonth(ym, null);
+  var gc = countGraceDaysInMonth(ym, null);
+  var tmpRec = { date: todayEntry.date, dayType: todayEntry.dayType, dutyOn: todayEntry.dutyOn, dutyOff: t };
+  var leaveType     = autoClassifyLeave(tmpRec, sc, gc);
+  var halfLeavePool = (leaveType && leaveType.indexOf('half')===0) ? 'casual' : null;
+
+  var rec = {
+    id:            Date.now().toString(),
+    date:          todayEntry.date,
+    dayType:       todayEntry.dayType,
+    dutyOn:        todayEntry.dutyOn,
+    dutyOff:       t,
+    leaveType:     leaveType,
+    halfLeavePool: halfLeavePool,
+    leaveApproved: false
+  };
+
+  attendance = attendance.filter(function(r){ return r.date !== rec.date; });
+  attendance.push(rec);
+  attendance.sort(function(a,b){ return a.date.localeCompare(b.date); });
+  save('ot_att', attendance);
+
+  todayEntry = null;
+  try { localStorage.removeItem(userKey('ot_today')); } catch(e) {}
+  showToast('🕔 Duty Off recorded: ' + t + (leaveType ? ' — ' + leaveTypeLabel(leaveType) : ''));
+  render();
+}
+
+function quickClearToday() {
+  if (!confirm('Clear today\'s Duty On record?')) return;
+  todayEntry = null;
+  try { localStorage.removeItem(userKey('ot_today')); } catch(e) {}
+  render();
+}
+
+function quickEditDutyOn() {
+  if (!todayEntry) return;
+  var corrected = prompt('Correct Duty On time:', todayEntry.dutyOn);
+  if (!corrected) return;
+  corrected = corrected.trim();
+  if (!/^\d{2}:\d{2}$/.test(corrected)) { alert('Use HH:MM format (e.g. 08:35)'); return; }
+  todayEntry.dutyOn = corrected;
+  try { localStorage.setItem(userKey('ot_today'), JSON.stringify(todayEntry)); } catch(e) {}
+  showToast('🕐 Duty On updated: ' + corrected);
+  render();
+}
+
+function renderTodayCard() {
+  var today = todayStr();
+  var existingRec = attendance.find(function(r){ return r.date === today; });
+
+  /* ── State 3: Full record already saved for today ── */
+  if (existingRec) {
+    var isAbs = (existingRec.dayType==='leave-casual'||existingRec.dayType==='leave-sick');
+    var ot    = calcOT(existingRec);
+    return '<div class="card" style="border-left:3px solid var(--green);margin-bottom:16px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">' +
+        '<div><div class="card-title" style="margin-bottom:4px">✅ Today — ' + fmtDate(today) + '</div>' +
+        '<div style="font-size:13px;color:var(--text2);display:flex;gap:16px;flex-wrap:wrap;margin-top:6px">' +
+          '<span>' + dayBadge(existingRec.dayType) + '</span>' +
+          (isAbs ? '' : '<span style="background:var(--green-bg);padding:4px 10px;border-radius:6px;color:var(--green-text);font-weight:600">🕐 ' + existingRec.dutyOn + '</span>') +
+          (isAbs ? '' : '<span style="background:var(--blue-bg);padding:4px 10px;border-radius:6px;color:var(--blue-text);font-weight:600">🕔 ' + existingRec.dutyOff + '</span>') +
+          (ot > 0 ? '<span style="color:var(--green-text);font-weight:600">⏱ OT: ' + fmt(ot) + 'h</span>' : '') +
+          (existingRec.leaveType ? '<span>' + leaveBadge(existingRec.leaveType) + '</span>' : '') +
+        '</div></div>' +
+        '<button class="btn btn-sm" onclick="startEdit(\'' + existingRec.id + '\')">✏️ Edit</button>' +
+      '</div></div>';
+  }
+
+  /* ── State 2: Duty On recorded, waiting for Duty Off ── */
+  if (todayEntry && todayEntry.date === today) {
+    return '<div class="card" style="border-left:3px solid var(--amber);margin-bottom:16px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:14px">' +
+        '<div class="card-title">⏳ Today — ' + fmtDate(today) + '</div>' +
+        '<span id="live-clock" style="font-size:13px;font-weight:600;color:var(--text2);font-variant-numeric:tabular-nums"></span>' +
+      '</div>' +
+      '<div style="display:flex;align-items:stretch;gap:12px;flex-wrap:wrap;margin-bottom:14px">' +
+        '<div style="flex:1;min-width:120px;background:var(--green-bg);border:1px solid var(--green);border-radius:10px;padding:14px 18px;text-align:center">' +
+          '<div style="font-size:11px;color:var(--green-text);font-weight:700;letter-spacing:.04em;margin-bottom:4px">🕐 DUTY ON</div>' +
+          '<div style="font-size:28px;font-weight:800;color:var(--green-text);font-variant-numeric:tabular-nums">' + todayEntry.dutyOn + '</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:2px">recorded</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;color:var(--text3);font-size:20px">→</div>' +
+        '<div style="flex:1;min-width:120px;background:var(--blue-bg);border:2px dashed var(--blue);border-radius:10px;padding:14px 18px;text-align:center;cursor:pointer" onclick="quickRecordDutyOff()">' +
+          '<div style="font-size:11px;color:var(--blue-text);font-weight:700;letter-spacing:.04em;margin-bottom:4px">🕔 DUTY OFF</div>' +
+          '<div style="font-size:18px;font-weight:700;color:var(--blue-text)">Tap to record</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:2px">stamps current time</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn btn-primary" style="flex:1;font-size:14px;padding:11px" onclick="quickRecordDutyOff()">🕔 Record Duty Off Now</button>' +
+        '<button class="btn" onclick="quickEditDutyOn()" title="Correct duty on time">✏️ Edit In</button>' +
+        '<button class="btn" onclick="quickClearToday()">✕ Clear</button>' +
+      '</div></div>';
+  }
+
+  /* ── State 1: Nothing recorded yet ── */
+  return '<div class="card" style="border-left:3px solid var(--border2);margin-bottom:16px">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:14px">' +
+      '<div class="card-title">🗓️ Today — ' + fmtDate(today) + '</div>' +
+      '<span id="live-clock" style="font-size:13px;font-weight:600;color:var(--text2);font-variant-numeric:tabular-nums"></span>' +
+    '</div>' +
+    '<button class="btn btn-primary" style="font-size:15px;padding:12px 28px;width:100%;letter-spacing:.01em" onclick="quickRecordDutyOn()">🕐 Record Duty On — stamps current time</button>' +
+    '<div style="margin-top:8px;font-size:12px;color:var(--text3)">Tap when you arrive. Come back to record Duty Off when you leave.</div>' +
+    '</div>';
+}
+
+/* ════════════════════════════════════════════
    TAB 0 – ATTENDANCE
    ════════════════════════════════════════════ */
 function renderTab0() {
@@ -948,8 +1100,20 @@ function renderTab0() {
   /* ── Form ── */
   var timeFields = isAbsent ? '' :
     '<div class="form-grid cols2">' +
-      '<div><label>Duty On Time</label><input type="time" value="'+form.dutyOn+'" onchange="updateForm(\'dutyOn\',this.value)"></div>' +
-      '<div><label>Duty Off Time</label><input type="time" value="'+form.dutyOff+'" onchange="updateForm(\'dutyOff\',this.value)"></div>' +
+      '<div><label>Duty On Time</label>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<input type="time" value="'+form.dutyOn+'" onchange="updateForm(\'dutyOn\',this.value)" style="flex:1">' +
+          '<button type="button" onclick="updateForm(\'dutyOn\',nowTimeStr());render()" title="Stamp current time"' +
+            ' style="padding:6px 10px;font-size:12px;background:var(--green-bg);border:1px solid var(--green);' +
+            'border-radius:var(--radius-sm);color:var(--green-text);cursor:pointer;white-space:nowrap;font-family:inherit">⚡ Now</button>' +
+        '</div></div>' +
+      '<div><label>Duty Off Time</label>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<input type="time" value="'+form.dutyOff+'" onchange="updateForm(\'dutyOff\',this.value)" style="flex:1">' +
+          '<button type="button" onclick="updateForm(\'dutyOff\',nowTimeStr());render()" title="Stamp current time"' +
+            ' style="padding:6px 10px;font-size:12px;background:var(--blue-bg);border:1px solid var(--blue);' +
+            'border-radius:var(--radius-sm);color:var(--blue-text);cursor:pointer;white-space:nowrap;font-family:inherit">⚡ Now</button>' +
+        '</div></div>' +
     '</div>' + latePanel;
 
   var halfPoolField = (isHalf) ?
@@ -1679,6 +1843,12 @@ function render() {
   else if (currentTab===4) root.innerHTML = renderTab4();
   else                      root.innerHTML = renderTab5();
 }
+
+/* Live clock — updates every second on the today card */
+setInterval(function() {
+  var el = document.getElementById('live-clock');
+  if (el) el.textContent = nowTimeStr();
+}, 1000);
 
 initFromSheets();
 </script>
